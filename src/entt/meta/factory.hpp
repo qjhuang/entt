@@ -353,6 +353,10 @@ public:
      * From a client's point of view, nothing changes if a constructor of a meta
      * type is a built-in one or a free function.
      *
+     * This type of constructor supports _aliasing_ for constructing instances
+     * in external data structures and returning objects by reference rather
+     * than by copy.
+     *
      * @tparam Func The actual function to use as a constructor.
      * @tparam Property Types of properties to assign to the meta data.
      * @param property Properties to assign to the meta data.
@@ -653,6 +657,10 @@ public:
      * In case of member functions, getters have no arguments at all, while
      * setters has an argument of a type convertible to that of the parameter to
      * set.
+     *
+     * Getters support _aliasing_ for returning instances by reference rather
+     * than by copy. It's particularly useful for exporting large objects that
+     * aren't much convenient to copy.
      *
      * @tparam Setter The actual function to use as a setter.
      * @tparam Getter The actual function to use as a getter.
