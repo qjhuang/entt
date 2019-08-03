@@ -516,7 +516,7 @@ public:
             curr = &node;
         } else if constexpr(std::is_member_object_pointer_v<decltype(Data)>) {
             static_assert(std::is_invocable_v<decltype(Data), Type &>);
-            constexpr auto is_const = std::is_const_v<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
+            static constexpr auto is_const = std::is_const_v<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
             using data_type = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
 
             static internal::meta_data_node node{
@@ -577,7 +577,7 @@ public:
             curr = &node;
         } else {
             static_assert(std::is_pointer_v<decltype(Data)>);
-            constexpr auto is_const = std::is_const_v<std::remove_pointer_t<decltype(Data)>>;
+            static constexpr auto is_const = std::is_const_v<std::remove_pointer_t<decltype(Data)>>;
             using data_type = std::remove_cv_t<std::remove_pointer_t<decltype(Data)>>;
 
             static internal::meta_data_node node{
