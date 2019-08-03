@@ -24,7 +24,7 @@ namespace entt {
 namespace internal {
 
 
-template<typename...>
+template<typename>
 struct meta_function_helper;
 
 
@@ -34,9 +34,10 @@ struct meta_function_helper<Ret(Args...)> {
     using args_type = std::tuple<Args...>;
 
     template<std::size_t Index>
-    using arg_type = std::decay_t<std::tuple_element_t<Index, args_type>>;
+    using arg_type = std::remove_cv_t<std::remove_reference_t<std::tuple_element_t<Index, args_type>>>;
 
     static constexpr auto size = sizeof...(Args);
+    static constexpr auto is_const = false;
 
     static auto arg(typename internal::meta_func_node::size_type index) ENTT_NOEXCEPT {
         return std::array<meta_type_node *, sizeof...(Args)>{{meta_info<Args>::resolve()...}}[index];
@@ -44,31 +45,29 @@ struct meta_function_helper<Ret(Args...)> {
 };
 
 
-template<typename Class, typename Ret, typename... Args, bool Const, bool Static>
-struct meta_function_helper<Class, Ret(Args...), std::bool_constant<Const>, std::bool_constant<Static>>: meta_function_helper<Ret(Args...)> {
-    using class_type = Class;
-    static constexpr auto is_const = Const;
-    static constexpr auto is_static = Static;
+template<typename Ret, typename... Args>
+struct meta_function_helper<Ret(Args...) const>: meta_function_helper<Ret(Args...)> {
+    static constexpr auto is_const = true;
 };
 
 
 template<typename Ret, typename... Args, typename Class>
-constexpr meta_function_helper<Class, Ret(Args...), std::bool_constant<false>, std::bool_constant<false>>
+constexpr meta_function_helper<Ret(Args...)>
 to_meta_function_helper(Ret(Class:: *)(Args...));
 
 
 template<typename Ret, typename... Args, typename Class>
-constexpr meta_function_helper<Class, Ret(Args...), std::bool_constant<true>, std::bool_constant<false>>
+constexpr meta_function_helper<Ret(Args...) const>
 to_meta_function_helper(Ret(Class:: *)(Args...) const);
 
 
 template<typename Ret, typename... Args>
-constexpr meta_function_helper<void, Ret(Args...), std::bool_constant<false>, std::bool_constant<true>>
+constexpr meta_function_helper<Ret(Args...)>
 to_meta_function_helper(Ret(*)(Args...));
 
 
-template<auto Func>
-struct meta_function_helper<std::integral_constant<decltype(Func), Func>>: decltype(to_meta_function_helper(Func)) {};
+template<typename Candidate>
+using meta_function_helper_t = decltype(to_meta_function_helper(std::declval<Candidate>()));
 
 
 template<typename Type, typename... Args, std::size_t... Indexes>
@@ -84,137 +83,32 @@ meta_any construct(meta_any * const args, std::index_sequence<Indexes...>) {
 }
 
 
-template<bool Const, typename Type, auto Data>
-bool setter([[maybe_unused]] meta_handle handle, [[maybe_unused]] meta_any index, [[maybe_unused]] meta_any value) {
-    bool accepted = false;
+template<typename Type, auto Candidate, std::size_t... Indexes>
+meta_any invoke([[maybe_unused]] meta_handle handle, meta_any * const args, std::index_sequence<Indexes...>) {
+    using helper_type = meta_function_helper_t<decltype(Candidate)>;
+    [[maybe_unused]] auto direct = std::make_tuple((args+Indexes)->try_cast<typename helper_type::template arg_type<Indexes>>()...);
+    meta_any any{};
 
-    if constexpr(!Const) {
-        if constexpr(std::is_function_v<std::remove_pointer_t<decltype(Data)>> || std::is_member_function_pointer_v<decltype(Data)>) {
-            using helper_type = meta_function_helper<std::integral_constant<decltype(Data), Data>>;
-            using data_type = std::decay_t<std::tuple_element_t<!std::is_member_function_pointer_v<decltype(Data)>, typename helper_type::args_type>>;
-            static_assert(std::is_invocable_v<decltype(Data), Type &, data_type>);
-            auto *direct = value.try_cast<data_type>();
-            auto *clazz = handle.data<Type>();
-
-            if(clazz && (direct || value.convert<data_type>())) {
-                std::invoke(Data, *clazz, direct ? *direct : value.cast<data_type>());
-                accepted = true;
-            }
-        } else if constexpr(std::is_member_object_pointer_v<decltype(Data)>) {
-            using data_type = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
-            static_assert(std::is_invocable_v<decltype(Data), Type>);
-            auto *clazz = handle.data<Type>();
-
-            if constexpr(std::is_array_v<data_type>) {
-                using underlying_type = std::remove_extent_t<data_type>;
-                auto *direct = value.try_cast<underlying_type>();
-                auto *idx = index.try_cast<std::size_t>();
-
-                if(clazz && idx && (direct || value.convert<underlying_type>())) {
-                    std::invoke(Data, clazz)[*idx] = direct ? *direct : value.cast<underlying_type>();
-                    accepted = true;
-                }
+    if constexpr(std::is_function_v<std::remove_pointer_t<decltype(Candidate)>>) {
+        if(((std::get<Indexes>(direct) || (args+Indexes)->convert<typename helper_type::template arg_type<Indexes>>()) && ...)) {
+            if constexpr(std::is_void_v<typename helper_type::return_type>) {
+                std::invoke(Candidate, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
+                any.emplace<void>();
             } else {
-                auto *direct = value.try_cast<data_type>();
-
-                if(clazz && (direct || value.convert<data_type>())) {
-                    std::invoke(Data, clazz) = (direct ? *direct : value.cast<data_type>());
-                    accepted = true;
-                }
+                any = std::invoke(Candidate, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
             }
-        } else {
-            static_assert(std::is_pointer_v<decltype(Data)>);
-            using data_type = std::remove_cv_t<std::remove_reference_t<decltype(*Data)>>;
-
-            if constexpr(std::is_array_v<data_type>) {
-                using underlying_type = std::remove_extent_t<data_type>;
-                auto *direct = value.try_cast<underlying_type>();
-                auto *idx = index.try_cast<std::size_t>();
-
-                if(idx && (direct || value.convert<underlying_type>())) {
-                    (*Data)[*idx] = (direct ? *direct : value.cast<underlying_type>());
-                    accepted = true;
-                }
-            } else {
-                auto *direct = value.try_cast<data_type>();
-
-                if(direct || value.convert<data_type>()) {
-                    *Data = (direct ? *direct : value.cast<data_type>());
-                    accepted = true;
-                }
-            }
-        }
-    }
-
-    return accepted;
-}
-
-
-template<typename Type, auto Data>
-meta_any getter([[maybe_unused]] meta_handle handle, [[maybe_unused]] meta_any index) {
-    if constexpr(std::is_function_v<std::remove_pointer_t<decltype(Data)>> || std::is_member_function_pointer_v<decltype(Data)>) {
-        static_assert(std::is_invocable_v<decltype(Data), Type &>);
-        auto *clazz = handle.data<Type>();
-        return clazz ? std::invoke(Data, *clazz) : meta_any{};
-    } else if constexpr(std::is_member_object_pointer_v<decltype(Data)>) {
-        using data_type = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
-        static_assert(std::is_invocable_v<decltype(Data), Type *>);
-        auto *clazz = handle.data<Type>();
-
-        if constexpr(std::is_array_v<data_type>) {
-            auto *idx = index.try_cast<std::size_t>();
-            return (clazz && idx) ? std::invoke(Data, clazz)[*idx] : meta_any{};
-        } else {
-            return clazz ? std::invoke(Data, clazz) : meta_any{};
         }
     } else {
-        static_assert(std::is_pointer_v<decltype(Data)>);
+        static_assert(std::is_member_function_pointer_v<decltype(Candidate)>);
+        auto *clazz = handle.template data<Type>();
 
-        if constexpr(std::is_array_v<std::remove_pointer_t<decltype(Data)>>) {
-            auto *idx = index.try_cast<std::size_t>();
-            return idx ? (*Data)[*idx] : meta_any{};
-        } else {
-            return *Data;
-        }
-    }
-}
-
-
-template<typename Type, auto Func, std::size_t... Indexes>
-std::enable_if_t<std::is_function_v<std::remove_pointer_t<decltype(Func)>>, meta_any>
-invoke(meta_handle, meta_any *args, std::index_sequence<Indexes...>) {
-    using helper_type = meta_function_helper<std::integral_constant<decltype(Func), Func>>;
-    [[maybe_unused]] auto direct = std::make_tuple((args+Indexes)->try_cast<typename helper_type::template arg_type<Indexes>>()...);
-    meta_any any{};
-
-    if(((std::get<Indexes>(direct) || (args+Indexes)->convert<typename helper_type::template arg_type<Indexes>>()) && ...)) {
-        if constexpr(std::is_void_v<typename helper_type::return_type>) {
-            std::invoke(Func, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
-            any.emplace<void>();
-        } else {
-            any = std::invoke(Func, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
-        }
-    }
-
-    return any;
-}
-
-
-template<typename Type, auto Member, std::size_t... Indexes>
-std::enable_if_t<std::is_member_function_pointer_v<decltype(Member)>, meta_any>
-invoke(meta_handle handle, meta_any *args, std::index_sequence<Indexes...>) {
-    using helper_type = meta_function_helper<std::integral_constant<decltype(Member), Member>>;
-    static_assert(std::is_base_of_v<typename helper_type::class_type, Type>);
-    [[maybe_unused]] auto direct = std::make_tuple((args+Indexes)->try_cast<typename helper_type::template arg_type<Indexes>>()...);
-    auto *clazz = handle.data<Type>();
-    meta_any any{};
-
-    if(clazz && ((std::get<Indexes>(direct) || (args+Indexes)->convert<typename helper_type::template arg_type<Indexes>>()) && ...)) {
-        if constexpr(std::is_void_v<typename helper_type::return_type>) {
-            std::invoke(Member, clazz, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
-            any.emplace<void>();
-        } else {
-            any = std::invoke(Member, clazz, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
+        if(clazz && ((std::get<Indexes>(direct) || (args+Indexes)->convert<typename helper_type::template arg_type<Indexes>>()) && ...)) {
+            if constexpr(std::is_void_v<typename helper_type::return_type>) {
+                std::invoke(Candidate, clazz, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
+                any.emplace<void>();
+            } else {
+                any = std::invoke(Candidate, clazz, (std::get<Indexes>(direct) ? *std::get<Indexes>(direct) : (args+Indexes)->cast<typename helper_type::template arg_type<Indexes>>())...);
+            }
         }
     }
 
@@ -466,8 +360,7 @@ public:
      */
     template<auto Func, typename... Property>
     meta_factory ctor(Property &&... property) ENTT_NOEXCEPT {
-        using helper_type = internal::meta_function_helper<std::integral_constant<decltype(Func), Func>>;
-        static_assert(std::is_same_v<typename helper_type::return_type, Type>);
+        using helper_type = internal::meta_function_helper_t<decltype(Func)>;
         auto * const type = internal::meta_info<Type>::resolve();
 
         static internal::meta_ctor_node node{
@@ -477,8 +370,10 @@ public:
             nullptr,
             helper_type::size,
             &helper_type::arg,
-            [](meta_any * const any) {
-                return internal::invoke<Type, Func>({}, any, std::make_index_sequence<helper_type::size>{});
+            [](meta_any * const args) {
+                meta_any any = internal::invoke<Type, Func>({}, args, std::make_index_sequence<helper_type::size>{});
+                ENTT_ASSERT(!any || any.try_cast<Type>());
+                return any;
             },
             []() ENTT_NOEXCEPT -> meta_ctor {
                 return &node;
@@ -508,7 +403,7 @@ public:
      */
     template<typename... Args, typename... Property>
     meta_factory ctor(Property &&... property) ENTT_NOEXCEPT {
-        using helper_type = internal::meta_function_helper<Type(Args...)>;
+        using helper_type = internal::meta_function_helper_t<Type(*)(Args...)>;
         auto * const type = internal::meta_info<Type>::resolve();
 
         static internal::meta_ctor_node node{
@@ -518,8 +413,8 @@ public:
             nullptr,
             helper_type::size,
             &helper_type::arg,
-            [](meta_any * const any) {
-                return internal::construct<Type, Args...>(any, std::make_index_sequence<helper_type::size>{});
+            [](meta_any * const args) {
+                return internal::construct<Type, Args...>(args, std::make_index_sequence<helper_type::size>{});
             },
             []() ENTT_NOEXCEPT -> meta_ctor {
                 return &node;
@@ -551,7 +446,7 @@ public:
      * @tparam Func The actual function to use as a destructor.
      * @return A meta factory for the parent type.
      */
-    template<auto *Func>
+    template<auto Func>
     meta_factory dtor() ENTT_NOEXCEPT {
         static_assert(std::is_invocable_v<decltype(Func), Type *>);
         auto * const type = internal::meta_info<Type>::resolve();
@@ -561,7 +456,7 @@ public:
             type,
             [](meta_handle handle) {
                 return handle.type() == internal::meta_info<Type>::resolve()->meta()
-                        ? ((*Func)(handle.data<Type>()), true)
+                        ? (Func(handle.data<Type>()), true)
                         : false;
             },
             []() ENTT_NOEXCEPT -> meta_dtor {
@@ -616,7 +511,9 @@ public:
             node.prop = properties<std::integral_constant<Type, Data>>(std::forward<Property>(property)...);
             curr = &node;
         } else if constexpr(std::is_member_object_pointer_v<decltype(Data)>) {
-            using data_type = std::remove_reference_t<decltype(std::declval<Type>().*Data)>;
+            static_assert(std::is_invocable_v<decltype(Data), Type &>);
+            constexpr auto is_const = std::is_const_v<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
+            using data_type = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Type>().*Data)>>;
 
             static internal::meta_data_node node{
                 &internal::meta_info<Type>::template data<Data>,
@@ -624,11 +521,49 @@ public:
                 type,
                 nullptr,
                 nullptr,
-                std::is_const_v<data_type>,
+                is_const,
                 !std::is_member_object_pointer_v<decltype(Data)>,
                 &internal::meta_info<data_type>::resolve,
-                &internal::setter<std::is_const_v<data_type>, Type, Data>,
-                &internal::getter<Type, Data>,
+                []([[maybe_unused]] meta_handle handle, [[maybe_unused]] meta_any index, [[maybe_unused]] meta_any value) {
+                    bool done = false;
+
+                    if constexpr(!is_const) {
+                        if(auto *clazz = handle.data<Type>(); clazz) {
+                            if constexpr(std::is_array_v<data_type>) {
+                                using underlying_type = std::remove_extent_t<data_type>;
+
+                                if(auto *idx = index.try_cast<std::size_t>(); idx) {
+                                    if(auto *direct = value.try_cast<underlying_type>(); direct || value.convert<underlying_type>()) {
+                                        std::invoke(Data, *clazz)[*idx] = direct ? *direct : value.cast<underlying_type>();
+                                        done = true;
+                                    }
+                                }
+                            } else {
+                                if(auto *direct = value.try_cast<data_type>(); direct || value.convert<data_type>()) {
+                                    std::invoke(Data, *clazz) = (direct ? *direct : value.cast<data_type>());
+                                    done = true;
+                                }
+                            }
+                        }
+                    }
+
+                    return done;
+                },
+                [](meta_handle handle, [[maybe_unused]] meta_any index) {
+                    meta_any any{};
+
+                    if(auto *clazz = handle.data<Type>(); clazz) {
+                        if constexpr(std::is_array_v<data_type>) {
+                            if(auto *idx = index.try_cast<std::size_t>(); idx) {
+                                any = std::invoke(Data, clazz)[*idx];
+                            }
+                        } else {
+                            any = std::invoke(Data, clazz);
+                        }
+                    }
+
+                    return any;
+                },
                 []() ENTT_NOEXCEPT -> meta_data {
                     return &node;
                 }
@@ -638,7 +573,8 @@ public:
             curr = &node;
         } else {
             static_assert(std::is_pointer_v<decltype(Data)>);
-            using data_type = std::remove_pointer_t<decltype(Data)>;
+            constexpr auto is_const = std::is_const_v<std::remove_pointer_t<decltype(Data)>>;
+            using data_type = std::remove_cv_t<std::remove_pointer_t<decltype(Data)>>;
 
             static internal::meta_data_node node{
                 &internal::meta_info<Type>::template data<Data>,
@@ -646,11 +582,45 @@ public:
                 type,
                 nullptr,
                 nullptr,
-                std::is_const_v<data_type>,
+                is_const,
                 !std::is_member_object_pointer_v<decltype(Data)>,
                 &internal::meta_info<data_type>::resolve,
-                &internal::setter<std::is_const_v<data_type>, Type, Data>,
-                &internal::getter<Type, Data>,
+                [](meta_handle, [[maybe_unused]] meta_any index, [[maybe_unused]] meta_any value) {
+                    bool accepted = false;
+
+                    if constexpr(!is_const) {
+                        if constexpr(std::is_array_v<data_type>) {
+                            using underlying_type = std::remove_extent_t<data_type>;
+
+                            if(auto *idx = index.try_cast<std::size_t>(); idx) {
+                                if(auto *direct = value.try_cast<underlying_type>(); direct || value.convert<underlying_type>()) {
+                                    (*static_cast<decltype(Data)>(Data))[*idx] = (direct ? *direct : value.cast<underlying_type>());
+                                    accepted = true;
+                                }
+                            }
+                        } else {
+                            if(auto *direct = value.try_cast<data_type>(); direct || value.convert<data_type>()) {
+                                *static_cast<decltype(Data)>(Data) = (direct ? *direct : value.cast<data_type>());
+                                accepted = true;
+                            }
+                        }
+                    }
+
+                    return accepted;
+                },
+                [](meta_handle, [[maybe_unused]] meta_any index) {
+                    meta_any any{};
+
+                    if constexpr(std::is_array_v<std::remove_pointer_t<decltype(Data)>>) {
+                        if(auto *idx = index.try_cast<std::size_t>(); idx) {
+                            any = (*static_cast<decltype(Data)>(Data))[*idx];
+                        }
+                    } else {
+                        any = *static_cast<decltype(Data)>(Data);
+                    }
+
+                    return any;
+                },
                 []() ENTT_NOEXCEPT -> meta_data {
                     return &node;
                 }
@@ -694,8 +664,9 @@ public:
     template<auto Setter, auto Getter, typename... Property>
     meta_factory data(const ENTT_ID_TYPE identifier, Property &&... property) ENTT_NOEXCEPT {
         using owner_type = std::tuple<std::integral_constant<decltype(Setter), Setter>, std::integral_constant<decltype(Getter), Getter>>;
-        using underlying_type = std::invoke_result_t<decltype(Getter), Type &>;
-        static_assert(std::is_invocable_v<decltype(Setter), Type &, underlying_type>);
+        using helper_type = internal::meta_function_helper_t<decltype(Setter)>;
+        using data_type = typename helper_type::template arg_type<!std::is_member_function_pointer_v<decltype(Setter)>>;
+        static_assert(std::is_invocable_v<decltype(Setter), Type &, data_type &>);
         auto * const type = internal::meta_info<Type>::resolve();
 
         static internal::meta_data_node node{
@@ -706,9 +677,30 @@ public:
             nullptr,
             false,
             false,
-            &internal::meta_info<underlying_type>::resolve,
-            &internal::setter<false, Type, Setter>,
-            &internal::getter<Type, Getter>,
+            &internal::meta_info<data_type>::resolve,
+            []([[maybe_unused]] meta_handle handle, meta_any, meta_any value) {
+                auto *direct = value.try_cast<data_type>();
+                auto *clazz = handle.data<Type>();
+                bool done = false;
+
+                if(clazz && (direct || value.convert<data_type>())) {
+                    std::invoke(Setter, *clazz, direct ? *direct : value.cast<data_type>());
+                    done = true;
+                }
+
+                return done;
+            },
+            [](meta_handle handle, meta_any) {
+                static_assert(std::is_invocable_v<decltype(Getter), Type &>);
+                meta_any any{};
+
+                if(auto *clazz = handle.data<Type>(); clazz) {
+                    any = std::invoke(Getter, *clazz);
+                    ENTT_ASSERT(any.try_cast<std::remove_cv_t<std::remove_reference_t<data_type>>>());
+                }
+
+                return any;
+            },
             []() ENTT_NOEXCEPT -> meta_data {
                 return &node;
             }
@@ -739,25 +731,25 @@ public:
      * @param property Properties to assign to the meta function.
      * @return A meta factory for the parent type.
      */
-    template<auto Func, typename... Property>
+    template<auto Candidate, typename... Property>
     meta_factory func(const ENTT_ID_TYPE identifier, Property &&... property) ENTT_NOEXCEPT {
-        using owner_type = std::integral_constant<decltype(Func), Func>;
-        using func_type = internal::meta_function_helper<std::integral_constant<decltype(Func), Func>>;
+        using owner_type = std::integral_constant<decltype(Candidate), Candidate>;
+        using helper_type = internal::meta_function_helper_t<decltype(Candidate)>;
         auto * const type = internal::meta_info<Type>::resolve();
 
         static internal::meta_func_node node{
-            &internal::meta_info<Type>::template func<Func>,
+            &internal::meta_info<Type>::template func<Candidate>,
             {},
             type,
             nullptr,
             nullptr,
-            func_type::size,
-            func_type::is_const,
-            func_type::is_static,
-            &internal::meta_info<typename func_type::return_type>::resolve,
-            &func_type::arg,
-            [](meta_handle handle, meta_any *any) {
-                return internal::invoke<Type, Func>(handle, any, std::make_index_sequence<func_type::size>{});
+            helper_type::size,
+            helper_type::is_const,
+            std::is_function_v<std::remove_pointer_t<decltype(Candidate)>>,
+            &internal::meta_info<typename helper_type::return_type>::resolve,
+            &helper_type::arg,
+            [](meta_handle handle, meta_any * const args) {
+                return internal::invoke<Type, Candidate>(handle, args, std::make_index_sequence<helper_type::size>{});
             },
             []() ENTT_NOEXCEPT -> meta_func {
                 return &node;
@@ -768,8 +760,8 @@ public:
         node.next = type->func;
         node.prop = properties<owner_type>(std::forward<Property>(property)...);
         ENTT_ASSERT(!duplicate(identifier, node.next));
-        ENTT_ASSERT((!internal::meta_info<Type>::template func<Func>));
-        internal::meta_info<Type>::template func<Func> = &node;
+        ENTT_ASSERT((!internal::meta_info<Type>::template func<Candidate>));
+        internal::meta_info<Type>::template func<Candidate> = &node;
         type->func = &node;
 
         return *this;
