@@ -91,6 +91,38 @@ It can be used to extend the reflected type and add the following:
   entt::reflect<my_type>("reflected"_hs).ctor<int, char>().ctor<&factory>();
   ```
 
+  Free functions can also be used in a sort of advanced mode for constructing
+  objects in external data structures and returning instances by reference
+  rather than by copy.<br/>
+  This technique is called _aliasing_. An example of this type of constructor
+  follows:
+
+  ```cpp
+  template<typename Component>
+  entt::meta_any assign(entt::registry &registry, const entt::entity entity) {
+      return entt::meta_any{std::in_place, registry.assign<Component>(entity);
+  }
+
+  entt::reflect<my_type>("reflected"_hs).ctor<&assign<my_type>>();
+  ```
+
+  Any change to the object returned by the constructor will be reflected this
+  time directly on the instance contained in the data structure that owns it.
+  Moreover, the object won't be destroyed when the `meta_any` that _contains_ it
+  goes out of scope.<br/>
+  The `registry` parameter can in turn be passed by exploiting the possibility
+  of a `meta_any` to work with unmanaged objects, which is the same feature used
+  in the body of the constructor:
+
+  ```cpp
+  const auto entity = registry.create();
+  auto ctor = entt::resolve("reflected"_hs).ctor<entt::registry &, const entt::entity>();
+  ctor.invoke(entt::meta_any{std::in_place, registry}, entity);
+  ```
+
+  To find out what the `registry` class is for, see the section on the
+  entity-component system.
+
 * _Destructors_. Free functions can be set as destructors of reflected types.
   The purpose is to give users the ability to free up resources that require
   special treatment before an object is actually destroyed.<br/>
@@ -119,6 +151,10 @@ It can be used to extend the reflected type and add the following:
   Data members can be set also by means of a couple of functions, namely a
   setter and a getter. Setters and getters can be either free functions, member
   functions or mixed ones, as long as they respect the required signatures.<br/>
+  Getters can also be designed to return objects by reference rather than by
+  copy. It's particularly useful for exporting large objects that aren't much
+  convenient to copy. This technique is called _aliasing_ and it works as
+  already discussed with regard to constructors.<br/>
   Refer to the inline documentation for all the details.
 
 * _Member functions_. Both real member functions of the underlying type and free
@@ -204,7 +240,9 @@ entt::meta_any any{std::in_place, value};
 ```
 
 In this case, the contained instance is never destroyed and users must ensure
-that the lifetime of the object exceeds that of the container.
+that the lifetime of the object exceeds that of the container.<br/>
+This mode is extremely useful for passing arguments by reference rather than by
+copy and to exploit _aliasing_ for constructors or getters.
 
 A meta any object has a `type` member function that returns the meta type of the
 contained value, if any. The member functions `try_cast`, `cast` and `convert`
